@@ -1,0 +1,84 @@
+import json
+import os
+import sys
+import boto3
+import google_auth_oauthlib.flow #for handling OAuth 2.0 authentication flows
+import googleapiclient.discovery #Accessing Google APIs dynamically without manually writing API requests.
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
+def get_secrets():
+    client=boto3.client(
+        service_name='secretsmanager',
+        region_name='eu-north-1'
+    )
+    response=client.get_secret_value(SecretId="spotify-yt-automate-secret")
+    return json.loads(response["SecretString"]) #returns decrypted secret value
+
+def get_youtube_client(secrets):
+
+    #creats the oauth flow and provides the required creds
+    flow=google_auth_oauthlib.flow.InstalledAppFlow.from_client_config({
+        "Installed":{
+            "client_id":secrets["YT_CLIENT_ID"],
+            "client_secret":secrets["YT_CLIENT_SECRET"],
+            "redirect_uris":["http://localhost:8080/"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token"
+        }},
+        ["https://www.googleapis.com/auth/youtube.readonly"]
+    )
+
+    credentials=flow.run_local_server(port=8080,prompt='consent') #generates the credetials required for yt data api v3 to interact with our yt account dynamically
+    return googleapiclient.discovery.build("youtube","v3",credentials=credentials)
+    #googleapiclient.discovery.build() initializes the YouTube Data API v3 and takes teh necessary creds to make authenticated requests.
+
+def get_liked_videos(secrets):
+    youtube=get_youtube_client(secrets)
+
+    request=youtube.videos().list(
+        part="snippet",
+        myRating="like",
+        maxResults=100
+    )
+
+    response=request.execute()
+    return [item["snippet"]["title"] for item in response.get("items",[])]
+
+def get_spotify_client(secrets):
+    return spotipy.Spotify(auth_manager=SpotifyOAuth(
+        client_id=secrets["SPOTIFY_CLIENT_ID"],
+        client_secret=secrets["SPOTIFY_CLIENT_SECRET"],
+        redirect_uri=secrets["REDIRECT_URI"],
+        scope="playlist-modify-public user-library-read"
+    ))
+
+def create_playlist(secrets,name="YouTube Liked Songs"):
+    spotify=get_spotify_client(secrets)
+    user_id=spotify.me()["id"]
+    playlist=spotify.user_playlist_create(user=user_id,name=name,public=True)
+    return playlist["id"]
+
+def search_song(secrets,song_name):
+    spotify=get_spotify_client(secrets)
+    results=spotify.search(q=song_name,limit=1,type="track")
+    tracks=results["tracks"]["items"]
+    return tracks[0]["id"] if tracks else None
+
+def add_songs_to_playlist(secrets,playlist_id,song_ids):
+    spotify=get_spotify_client(secrets)
+    spotify.playlist_add_items(playlist_id,song_ids)
+def lambda_handler(event, context):
+    # TODO implement
+
+    secrets=get_secrets()
+    liked_songs=get_liked_videos(secrets)
+    playlist_id=create_playlist(secrets)
+    song_ids=[search_song(secrets,song) for song in liked_songs if search_song(secrets,song)]
+
+    if song_ids:
+        add_songs_to_playlist(secrets,playlist_id,song_ids)
+    return {
+        'statusCode': 200,
+        'body': json.dumps('YouTube liked videos synced to Spotify!')
+    }
